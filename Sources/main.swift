@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.collectionBehavior = [.fullScreenNone]
         view = ViewerView(frame: CGRect(origin: .zero, size: screen.frame.size))
         view.onClose = { [weak self] in self?.close() }
+        view.onSwitchDisplay = { [weak self] in self?.moveToNextScreen() ?? false }
         window.contentView = view
         window.setFrame(screen.frame, display: false)
         Debug.mark("window ready")
@@ -63,6 +64,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ n: Notification) {
         NSApp.presentationOptions = [.autoHideDock, .autoHideMenuBar]
+    }
+
+    /// Cycles the fullscreen window through the connected displays (main ↔ second with two).
+    private func moveToNextScreen() -> Bool {
+        let screens = NSScreen.screens
+        guard screens.count > 1 else { return false }
+        let i = window.screen.flatMap { screens.firstIndex(of: $0) } ?? 0
+        window.setFrame(screens[(i + 1) % screens.count].frame, display: true)
+        view.displayChanged()
+        return true
     }
 
     /// Esc hides instead of quitting: the process stays resident (with caches released),

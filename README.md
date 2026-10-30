@@ -29,6 +29,7 @@ Press **H** in the app to show this list.
 | Return | Open in Photoshop |
 | ⇧⌘C | Copy the file's absolute path |
 | I | Info bar (name, position, dimensions, color profile, file size, zoom, mode) |
+| D | Move to the next display (main ↔ second), stays fullscreen |
 | H | Help |
 | Esc / Q / ⌘W | Close (Kuk stays resident for instant reopening) |
 | ⌘Q | Quit |

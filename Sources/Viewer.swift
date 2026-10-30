@@ -22,6 +22,8 @@ final class ViewerView: NSView {
     /// Called once, when the first image is on screen.
     var onFirstImage: (() -> Void)?
     var onClose: (() -> Void)?
+    /// Moves the window to the next display; false when there is only one.
+    var onSwitchDisplay: (() -> Bool)?
 
     private let imageLayer = CALayer()
     private let hud = Label(size: 15)
@@ -93,6 +95,19 @@ final class ViewerView: NSView {
         imageLayer.magnificationFilter = scale >= 3 ? .nearest : .linear
         CATransaction.commit()
         updateInfo()
+    }
+
+    /// Re-fit after moving to another display (size, scale or notch may differ).
+    func displayChanged() {
+        resetZoom()
+        apply()
+        layoutLabels()
+    }
+
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        if !userZoomed { resetZoom() }
+        apply()
     }
 
     override func setFrameSize(_ newSize: NSSize) {
@@ -259,6 +274,7 @@ final class ViewerView: NSView {
             case "z": toggleActualSize()
             case "i": toggleInfo()
             case "h": help.isHidden.toggle(); layoutLabels()
+            case "d": if onSwitchDisplay?() == false { flash("No other display") }
             case "q": onClose?()
             default: super.keyDown(with: e)
             }
@@ -385,6 +401,7 @@ final class ViewerView: NSView {
             ("Return", "Open in Photoshop"),
             ("⇧⌘C", "Copy file path"),
             ("I", "Info bar"),
+            ("D", "Move to next display"),
             ("H", "This help"),
             ("Esc", "Close"),
             ("⌘Q", "Quit"),

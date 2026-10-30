@@ -27,7 +27,7 @@ enum Debug {
         guard let keys = ProcessInfo.processInfo.environment["KUK_KEYS"] else { return }
         let codes: [String: (UInt16, String)] = [
             "space": (49, " "), "right": (124, "\u{F703}"), "left": (123, "\u{F702}"), "return": (36, "\r"),
-            "f": (3, "f"), "z": (6, "z"), "h": (4, "h"), "i": (34, "i"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"), "4": (21, "4"),
+            "f": (3, "f"), "d": (2, "d"), "z": (6, "z"), "h": (4, "h"), "i": (34, "i"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"), "4": (21, "4"),
         ]
         for k in keys.split(separator: ",").map(String.init) {
             guard let (code, chars) = codes[k], let e = NSEvent.keyEvent(
