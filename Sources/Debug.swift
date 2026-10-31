@@ -2,14 +2,30 @@ import AppKit
 
 /// Testing aid: with KUK_SNAPSHOT=/path.png set, renders the view's layers to a PNG
 /// shortly after the first image appears and prints the time since process start.
+/// `defaults write local.kuk.viewer timingLog -bool true` appends the same timing marks
+/// to ~/Library/Logs/Kuk.log, for measuring real opens from Finder.
 enum Debug {
     static var snapshotPath: String? { ProcessInfo.processInfo.environment["KUK_SNAPSHOT"] }
 
-    static let enabled = snapshotPath != nil
+    static let logFile: FileHandle? = {
+        guard UserDefaults.standard.bool(forKey: "timingLog") else { return nil }
+        let url = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Logs/Kuk.log")
+        if !FileManager.default.fileExists(atPath: url.path) { FileManager.default.createFile(atPath: url.path, contents: nil) }
+        let h = try? FileHandle(forWritingTo: url)
+        h?.seekToEndOfFile()
+        return h
+    }()
+
+    static let enabled = snapshotPath != nil || logFile != nil
+    /// KUK_CONFIRM=1 skips confirmation dialogs (tests only).
+    static let autoConfirm = ProcessInfo.processInfo.environment["KUK_CONFIRM"] == "1"
+    /// KUK_DRYRUN=1 prepares files for other apps without opening them (tests only).
+    static let dryRun = ProcessInfo.processInfo.environment["KUK_DRYRUN"] == "1"
 
     static func mark(_ label: String) {
         guard enabled else { return }
-        FileHandle.standardError.write("\(sinceLaunchMs()) ms  [\(String(format: "%.3f", Date().timeIntervalSince1970))]  \(label)\n".data(using: .utf8)!)
+        let line = "\(sinceLaunchMs()) ms  [\(String(format: "%.3f", Date().timeIntervalSince1970))]  \(label)\n".data(using: .utf8)!
+        (logFile ?? FileHandle.standardError).write(line)
     }
 
     static func sinceLaunchMs() -> Int {
@@ -26,14 +42,18 @@ enum Debug {
     static func pressKeys(_ view: NSView) {
         guard let keys = ProcessInfo.processInfo.environment["KUK_KEYS"] else { return }
         let codes: [String: (UInt16, String)] = [
-            "space": (49, " "), "right": (124, "\u{F703}"), "left": (123, "\u{F702}"), "return": (36, "\r"),
-            "f": (3, "f"), "d": (2, "d"), "z": (6, "z"), "h": (4, "h"), "i": (34, "i"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"), "4": (21, "4"),
+            "space": (49, " "), "esc": (53, "\u{1b}"), "backspace": (51, "\u{7f}"), "right": (124, "\u{F703}"), "up": (126, "\u{F700}"), "down": (125, "\u{F701}"), "left": (123, "\u{F702}"), "return": (36, "\r"),
+            "c": (8, "c"), "=": (24, "="), "f": (3, "f"), "d": (2, "d"), "z": (6, "z"), "h": (4, "h"), "i": (34, "i"), "1": (18, "1"), "2": (19, "2"), "3": (20, "3"), "4": (21, "4"),
         ]
-        for k in keys.split(separator: ",").map(String.init) {
+        for var k in keys.split(separator: ",").map(String.init) {
+            var flags: NSEvent.ModifierFlags = []
+            if k.hasPrefix("cmd+") { flags.insert(.command); k.removeFirst(4) }
+            if k.hasPrefix("shift+") { flags.insert(.shift); k.removeFirst(6) }
             guard let (code, chars) = codes[k], let e = NSEvent.keyEvent(
-                with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0, windowNumber: view.window?.windowNumber ?? 0,
+                with: .keyDown, location: .zero, modifierFlags: flags, timestamp: 0, windowNumber: view.window?.windowNumber ?? 0,
                 context: nil, characters: chars, charactersIgnoringModifiers: chars, isARepeat: false, keyCode: code) else { continue }
-            view.keyDown(with: e)
+            Debug.mark("key \(k)")
+            if !flags.contains(.command) || !view.performKeyEquivalent(with: e) { view.keyDown(with: e) }
         }
     }
 

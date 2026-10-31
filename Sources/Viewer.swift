@@ -1,5 +1,6 @@
 import AppKit
 import QuartzCore
+import UniformTypeIdentifiers
 
 final class ViewerWindow: NSWindow {
     override var canBecomeKey: Bool { true }
@@ -38,7 +39,7 @@ final class ViewerView: NSView {
         layer?.backgroundColor = NSColor.black.cgColor
         imageLayer.minificationFilter = .trilinear
         imageLayer.magnificationFilter = .linear
-        imageLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "frame": NSNull()]
+        imageLayer.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "frame": NSNull(), "transform": NSNull()]
         layer?.addSublayer(imageLayer)
         for l in [hud, info, help] { addSubview(l) }
         hud.alphaValue = 0
@@ -91,7 +92,11 @@ final class ViewerView: NSView {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if imageLayer.contents as! CGImage? !== d.image { imageLayer.contents = d.image }
-        imageLayer.frame = CGRect(origin: origin, size: displaySize)
+        // The layer holds the stored pixels; its transform turns them upright (EXIF orientation).
+        let s = displaySize
+        imageLayer.setAffineTransform(d.transform)
+        imageLayer.bounds = CGRect(origin: .zero, size: d.orientation >= 5 ? CGSize(width: s.height, height: s.width) : s)
+        imageLayer.position = CGPoint(x: origin.x + s.width / 2, y: origin.y + s.height / 2)
         imageLayer.magnificationFilter = scale >= 3 ? .nearest : .linear
         CATransaction.commit()
         updateInfo()
@@ -239,6 +244,125 @@ final class ViewerView: NSView {
         NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
     }
 
+    /// Opens the image in CleanShot X's annotation editor (its URL API) as it is on screen:
+    /// only the visible part, at the current zoom, 1 screen pixel = 1 pixel. `original` sends the file.
+    private func annotateInCleanShot(original: Bool) {
+        guard let url = current else { return }
+        guard NSWorkspace.shared.urlForApplication(withBundleIdentifier: "pl.maketheweb.cleanshotx") != nil else {
+            flash("CleanShot X not found"); return
+        }
+        guard !original, let d = shown, d.url == url else { sendToCleanShot(url); return }
+        let onScreen = CGRect(origin: origin, size: displaySize).intersection(area)
+        guard !onScreen.isNull, onScreen.width > 0, onScreen.height > 0 else { return }
+        let s = scale, b = backing
+        // Visible part in the original's upright pixels (both y-up).
+        let visible = CGRect(x: (onScreen.minX - origin.x) * b / s, y: (onScreen.minY - origin.y) * b / s,
+                             width: onScreen.width * b / s, height: onScreen.height * b / s)
+        let percent = Int((s * 100).rounded())
+        flash("\(percent) % → CleanShot")
+        DispatchQueue.global(qos: .userInitiated).async {
+            let file = Self.annotateFile(url, percent: percent)
+            let ok = Decoder.view(d, visible: visible, scale: s).map { Decoder.writePNG($0, to: file, dpi: 72 * b) } ?? false
+            Debug.mark("view rendered for CleanShot")
+            DispatchQueue.main.async { ok ? self.sendToCleanShot(file) : self.flash("Couldn't prepare the image") }
+        }
+    }
+
+    private func sendToCleanShot(_ file: URL) {
+        var c = URLComponents(string: "cleanshot://open-annotate")!
+        c.queryItems = [URLQueryItem(name: "filepath", value: file.path)]
+        guard let u = c.url else { return }
+        Debug.mark("sent to CleanShot: \(file.path)")
+        if Debug.dryRun { return }
+        NSWorkspace.shared.open(u, configuration: NSWorkspace.OpenConfiguration())   // async: no wait here
+    }
+
+    /// A new file in ~/Documents/Kuk; nothing there is ever deleted by Kuk.
+    private static func annotateFile(_ url: URL, percent: Int) -> URL {
+        let fm = FileManager.default
+        let docs = fm.urls(for: .documentDirectory, in: .userDomainMask).first ?? fm.homeDirectoryForCurrentUser.appendingPathComponent("Documents")
+        let dir = docs.appendingPathComponent("Kuk", isDirectory: true)
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let base = url.deletingPathExtension().lastPathComponent
+        var file = dir.appendingPathComponent("\(base) \(percent)%.png"), n = 1
+        while fm.fileExists(atPath: file.path) { n += 1; file = dir.appendingPathComponent("\(base) \(percent)% \(n).png") }
+        return file
+    }
+
+    /// Close Kuk and select the file in Finder.
+    private func revealInFinder() {
+        guard let url = current else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+        onClose?()
+    }
+
+    /// Moves the file to the Trash (Finder's Put Back works) and shows the next image at once;
+    /// the file comes back into the list if the move fails.
+    private func moveToTrash(confirm: Bool) {
+        guard let url = current else { return }
+        if confirm, !Debug.autoConfirm {
+            let alert = NSAlert()
+            alert.messageText = "Move “\(url.lastPathComponent)” to the Trash?"
+            alert.addButton(withTitle: "Move to Trash")
+            alert.addButton(withTitle: "Cancel")
+            alert.buttons[1].keyEquivalent = "\u{1b}"
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        let i = index
+        files.remove(at: i)
+        if files.isEmpty { onClose?() } else { go(to: i) }   // the next file slid into this slot
+        flash("Moved to Trash")
+        Debug.mark("trashed \(url.lastPathComponent)")
+        NSWorkspace.shared.recycle([url]) { [weak self] _, error in
+            Debug.mark("recycle done")
+            guard let self, let error else { return }
+            self.flash(error.localizedDescription)
+            if !self.files.isEmpty, !self.files.contains(url) {
+                self.files.insert(url, at: min(i, self.files.count))
+                self.go(to: i)
+            }
+        }
+    }
+
+    /// Copies the image itself: the file's own bytes, ready at once with no decoding. Formats other
+    /// apps rarely paste (HEIC, RAW, PSD…) also get a TIFF, made on a background thread.
+    private func copyImage() {
+        guard let url = current, let type = UTType(filenameExtension: url.pathExtension),
+              let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return }
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setData(data, forType: .init(type.identifier))
+        flash("Image copied")
+        Debug.mark("image copied")
+        guard ![UTType.jpeg, .png, .gif, .tiff].contains(type) else { return }
+        let count = pb.changeCount
+        DispatchQueue.global(qos: .utility).async {
+            guard let tiff = Self.tiff(url) else { return }
+            DispatchQueue.main.async {
+                guard pb.changeCount == count else { return }   // something else was copied meanwhile
+                pb.addTypes([.tiff], owner: nil)
+                pb.setData(tiff, forType: .tiff)
+                Debug.mark("tiff added")
+            }
+        }
+    }
+
+    /// Upright pixels at full size with the color profile embedded.
+    private static func tiff(_ url: URL) -> Data? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let p = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any],
+              let img = CGImageSourceCreateThumbnailAtIndex(src, 0, [
+                  kCGImageSourceCreateThumbnailFromImageAlways: true,
+                  kCGImageSourceCreateThumbnailWithTransform: true,
+                  kCGImageSourceThumbnailMaxPixelSize: max(p[kCGImagePropertyPixelWidth] as? Int ?? 0,
+                                                          p[kCGImagePropertyPixelHeight] as? Int ?? 0, 1),
+              ] as CFDictionary) else { return nil }
+        let out = NSMutableData()
+        guard let dst = CGImageDestinationCreateWithData(out, UTType.tiff.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(dst, img, nil)
+        return CGImageDestinationFinalize(dst) ? out as Data : nil
+    }
+
     private func copyPath() {
         guard let url = current else { return }
         NSPasteboard.general.clearContents()
@@ -252,14 +376,13 @@ final class ViewerView: NSView {
         NSCursor.setHiddenUntilMouseMoves(true)
         let shift = e.modifierFlags.contains(.shift)
         switch e.keyCode {
-        case 123: go(to: index - 1)                       // ←
-        case 124: go(to: index + 1)                       // →
+        case 123, 126: go(to: index - 1)                  // ← ↑
+        case 124, 125: go(to: index + 1)                  // → ↓
         case 49: go(to: index + (shift ? -1 : 1))         // space
-        case 126: pan(dy: -120)                           // ↑
-        case 125: pan(dy: 120)                            // ↓
         case 115: go(to: 0)                               // home
         case 119: go(to: files.count - 1)                 // end
-        case 36, 76: openInPhotoshop()                    // return / enter
+        case 36, 76: shift ? openInPhotoshop() : revealInFinder()   // return / enter
+        case 51, 117: moveToTrash(confirm: !shift)        // backspace / delete (⇧: no dialog)
         case 53: onClose?()                               // esc
         default:
             switch e.charactersIgnoringModifiers?.lowercased() {
@@ -284,8 +407,10 @@ final class ViewerView: NSView {
     override func performKeyEquivalent(with e: NSEvent) -> Bool {
         let flags = e.modifierFlags.intersection(.deviceIndependentFlagsMask)
         guard flags.contains(.command) else { return false }
+        if e.keyCode == 36 || e.keyCode == 76 { annotateInCleanShot(original: flags.contains(.shift)); return true }   // ⌘Return
         switch (e.charactersIgnoringModifiers?.lowercased(), flags.contains(.shift)) {
         case ("c", true): copyPath()
+        case ("c", false): copyImage()
         case ("=", _), ("+", _): zoom(by: 1.25)
         case ("-", _): zoom(by: 1 / 1.25)
         case ("0", _): resetZoom(); apply()
@@ -293,11 +418,6 @@ final class ViewerView: NSView {
         default: return false
         }
         return true
-    }
-
-    private func pan(dy: CGFloat) {
-        origin.y += dy
-        apply()
     }
 
     // MARK: Mouse & trackpad
@@ -389,16 +509,22 @@ final class ViewerView: NSView {
 
     private static let helpText: NSAttributedString = {
         let rows: [(String, String)] = [
-            ("→  ←  Space", "Next / previous image"),
+            ("→ ↓  ← ↑  Space", "Next / previous image"),
             ("Z", "Toggle zoom mode ↔ 100 %"),
             ("F", "Cycle zoom modes"),
             ("1  2  3  4", "100 % · Fit all · Fit smaller only · Fit larger only"),
             ("+  −  scroll  pinch", "Zoom"),
             ("0", "Reset zoom"),
-            ("Drag  ↑  ↓", "Pan"),
+            ("Drag  scroll", "Pan"),
             ("Double-click", "Toggle zoom mode ↔ 100 %"),
             ("Home  End", "First / last image"),
-            ("Return", "Open in Photoshop"),
+            ("Return", "Close and show in Finder"),
+            ("⇧Return", "Open in Photoshop"),
+            ("⌘Return", "Annotate in CleanShot X, as on screen"),
+            ("⇧⌘Return", "Annotate the original in CleanShot X"),
+            ("⌫", "Move to Trash…"),
+            ("⇧⌫", "Move to Trash, no dialog"),
+            ("⌘C", "Copy image"),
             ("⇧⌘C", "Copy file path"),
             ("I", "Info bar"),
             ("D", "Move to next display"),
@@ -444,3 +570,4 @@ final class Label: NSTextField {
         attributedStringValue.draw(with: bounds.insetBy(dx: pad.width, dy: pad.height), options: .usesLineFragmentOrigin)
     }
 }
+
