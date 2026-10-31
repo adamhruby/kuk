@@ -67,3 +67,7 @@ To make Kuk the default viewer: in Finder select an image, ⌘I → Open with �
 ```bash
 open -n --env KUK_SNAPSHOT=/tmp/kuk.png --env KUK_KEYS=h -a build/Kuk.app photo.jpg
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE). Provided as is, without warranty.
