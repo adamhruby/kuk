@@ -244,7 +244,7 @@ final class ViewerView: NSView {
         NSWorkspace.shared.open([url], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())
     }
 
-    /// Opens the image in CleanShot X's annotation editor (its URL API) as it is on screen:
+    /// Opens the image in CleanShot X's annotation editor as it is on screen:
     /// only the visible part, at the current zoom, 1 screen pixel = 1 pixel. `original` sends the file.
     private func annotateInCleanShot(original: Bool) {
         guard let url = current else { return }
@@ -268,13 +268,13 @@ final class ViewerView: NSView {
         }
     }
 
+    /// Opens the file with CleanShot X, which shows it in its annotation editor. Not its
+    /// cleanshot:// URL API: that one can be switched off or stop answering.
     private func sendToCleanShot(_ file: URL) {
-        var c = URLComponents(string: "cleanshot://open-annotate")!
-        c.queryItems = [URLQueryItem(name: "filepath", value: file.path)]
-        guard let u = c.url else { return }
+        guard let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "pl.maketheweb.cleanshotx") else { return }
         Debug.mark("sent to CleanShot: \(file.path)")
         if Debug.dryRun { return }
-        NSWorkspace.shared.open(u, configuration: NSWorkspace.OpenConfiguration())   // async: no wait here
+        NSWorkspace.shared.open([file], withApplicationAt: app, configuration: NSWorkspace.OpenConfiguration())   // async: no wait here
     }
 
     /// A new file in ~/Documents/Kuk; nothing there is ever deleted by Kuk.
